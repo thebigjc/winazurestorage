@@ -314,6 +314,7 @@ class BlobStorage(Storage):
         req = RequestWithMethod("PUT", "%s/%s/%s" % (self.get_base_url(), container_name, blob_name), data=data)
         req.add_header("Content-Length", "%d" % len(data))
         if content_type is not None: req.add_header("Content-Type", content_type)
+        else: req.add_header("Content-Type", "")
         self._credentials.sign_request(req)
         try:
             response = urlopen(req)
