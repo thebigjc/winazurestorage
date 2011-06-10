@@ -12,11 +12,17 @@ import hashlib
 import time
 import sys
 import os
+import uuid
 from xml.dom import minidom #TODO: Use a faster way of processing XML
 import re
 from urllib2 import Request, urlopen, URLError
 from urlparse import urlsplit
 from datetime import datetime, timedelta
+from lxml import etree
+import logging
+
+FORMAT = '%(asctime)-15s %(message)s'
+#logging.basicConfig(format=FORMAT, level=logging.INFO)
 
 DEVSTORE_ACCOUNT = "devstoreaccount1"
 DEVSTORE_SECRET_KEY = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
@@ -43,8 +49,14 @@ def parse_edm_datetime(input):
         d += timedelta(0, 0, int(round(float(input[input.index('.'):-1])*1000000)))
     return d
 
+def parse_edm_guid(input):
+    return uuid.UUID (input)
+
 def parse_edm_int32(input):
     return int(input)
+
+def parse_edm_int64(input):
+    return long(input)
 
 def parse_edm_double(input):
     return float(input)
@@ -251,27 +263,54 @@ class TableStorage(Storage):
 
     def _parse_entity(self, entry):
         entity = TableEntity()
-        for property in (p for p in entry.getElementsByTagName("m:properties")[0].childNodes if p.nodeType == minidom.Node.ELEMENT_NODE):
-            key = property.tagName[2:]
-            if property.hasAttribute('m:type'):
-                t = property.getAttribute('m:type')
-                if t.lower() == 'edm.datetime': value = parse_edm_datetime(property.firstChild.data)
-                elif t.lower() == 'edm.int32': value = parse_edm_int32(property.firstChild.data)
-                elif t.lower() == 'edm.boolean': value = parse_edm_boolean(property.firstChild.data)
-                elif t.lower() == 'edm.double': value = parse_edm_double(property.firstChild.data)
+        props = entry.find(".//{http://schemas.microsoft.com/ado/2007/08/dataservices/metadata}properties")
+        for property in props:
+            key = property.tag
+            if "{http://schemas.microsoft.com/ado/2007/08/dataservices/metadata}type" in property.attrib:
+                t = property.get('{http://schemas.microsoft.com/ado/2007/08/dataservices/metadata}type')
+                if t.lower() == 'edm.datetime': value = parse_edm_datetime(property.text)
+                elif t.lower() == 'edm.int32': value = parse_edm_int32(property.text)
+                elif t.lower() == 'edm.int64': value = parse_edm_int64(property.text)
+                elif t.lower() == 'edm.boolean': value = parse_edm_boolean(property.text)
+                elif t.lower() == 'edm.double': value = parse_edm_double(property.text)
+                elif t.lower() == 'edm.guid': value = parse_edm_guid(property.text)
                 else: raise Exception(t.lower())
-            else: value = property.firstChild is not None and property.firstChild.data or None
+            else: value = property.text is not None or None
             setattr(entity, key, value)
         return entity
 
     def get_all(self, table_name):
-        dom = minidom.parseString(urlopen(self._credentials.sign_table_request(Request("%s/%s" % (self.get_base_url(), table_name)))).read())
-        entries = dom.getElementsByTagName("entry")
-        entities = []
-        for entry in entries:
-            entities.append(self._parse_entity(entry))
-        dom.unlink()
-        return entities
+        done = False
+        nextPartitionKey = None
+        nextRowKey = None
+        while not done:
+            path = "%s/%s" % (self.get_base_url(), table_name)
+            if nextRowKey and nextPartitionKey:
+                path += "?NextPartitionKey=%s&NextRowKey=%s" % (nextPartitionKey, nextRowKey)
+
+            logging.info("open")
+            url = urlopen(self._credentials.sign_table_request(Request(path)))
+
+            logging.info("read")
+
+            s = url.read()
+
+            logging.info("parse")
+
+            dom = etree.fromstring(s)
+            logging.info("get")
+            entries = dom.findall("{http://www.w3.org/2005/Atom}entry")
+            for entry in entries:
+                yield self._parse_entity(entry)
+            logging.info("done")
+
+            info = url.info()
+            nextPartitionKey = info.get('x-ms-continuation-NextPartitionKey')
+            nextRowKey = info.get('x-ms-continuation-NextRowKey')
+
+            if not (nextPartitionKey and nextRowKey):
+                done = True
+
 
 class BlobStorage(Storage):
     def __init__(self, host = DEVSTORE_BLOB_HOST, account_name = DEVSTORE_ACCOUNT, secret_key = DEVSTORE_SECRET_KEY, use_path_style_uris = None):
